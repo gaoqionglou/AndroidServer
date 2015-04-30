@@ -1,0 +1,300 @@
+//
+//  PolyvSettings.m
+//  hlsplay
+//
+//  Created by seanwong on 3/27/15.
+//  Copyright (c) 2015 easefun. All rights reserved.
+//
+#import "GCDWebServer.h"
+#import "GCDWebServerDataResponse.h"
+#import <CommonCrypto/CommonDigest.h>
+#import "PolyvSettings.h"
+#import "EGOCache.h"
+#import "NSData+AES.h"
+
+NSString *PolyvPrivatekey;
+NSString *PolyvReadtoken;
+NSString *PolyvWritetoken;
+NSString *PolyvUserId;
+
+
+@interface PolyvSettings (){
+    GCDWebServer* _webServer;
+}
+
+@end
+
+
+@implementation PolyvSettings
+
++(NSDictionary*)loadVideoJson:(NSString*)vid{
+    NSDictionary *results;
+    NSError *error = nil;
+    
+    NSData* data = [[EGOCache globalCache]dataForKey:vid];
+    if(data==nil){
+        
+        NSString*jsonUrl = [NSString stringWithFormat:@"http://v3.polyv.net/videojson/%@.js",vid];
+        NSURL* url = [NSURL URLWithString:jsonUrl];
+        
+        NSMutableURLRequest* request = [NSMutableURLRequest requestWithURL:url cachePolicy:NSURLRequestReloadIgnoringCacheData timeoutInterval:10.0];
+        
+        [request setHTTPMethod:@"GET"];
+        NSURLResponse* response = nil;
+        data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:nil] ;
+        NSHTTPURLResponse *httpResponse = (NSHTTPURLResponse *)response;
+        if ([data length] >0 && [httpResponse statusCode] == 200)
+        {
+            
+            results = [NSJSONSerialization
+                       JSONObjectWithData:data
+                       options:0
+                       error:&error];
+            [[EGOCache globalCache] setData:data forKey:vid withTimeoutInterval:300];
+            
+            
+            
+        }
+    }else{
+        results = [NSJSONSerialization
+                   JSONObjectWithData:data
+                   options:0
+                   error:&error];
+        
+    }
+    
+    
+    
+    
+    return results;
+}
+
++ (NSString*)md5HexDigest:(NSString*)input {
+    const char* str = [input UTF8String];
+    unsigned char result[CC_MD5_DIGEST_LENGTH];
+    CC_MD5(str, strlen(str), result);
+    
+    NSMutableString *ret = [NSMutableString stringWithCapacity:CC_MD5_DIGEST_LENGTH*2];
+    for(int i = 0; i<CC_MD5_DIGEST_LENGTH; i++) {
+        [ret appendFormat:@"%02x",result[i]];
+    }
+    return ret;
+}
+
++(NSData*)getM3u8:(NSString*) url{
+    
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+    NSURLResponse * response;
+    NSError * error;
+    NSData * data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+    
+    return data;
+}
+
+
++(NSData*)getKeyWithVideoPoolId:(NSString*)videoPoolId  BitRate:(NSString*) bitrate{
+    NSDate *past = [NSDate date];
+    NSTimeInterval oldTime = [past timeIntervalSince1970]*1000;
+    NSString *ts = [[NSString alloc] initWithFormat:@"%0.0f", oldTime];
+    NSString*lastChar =[videoPoolId substringFromIndex:[videoPoolId length]-1];
+    
+    NSString*plainSign =[NSString stringWithFormat:@"%@%@%@%@%@",PolyvReadtoken,videoPoolId,bitrate,ts,PolyvPrivatekey];
+    
+    NSString*sign=[PolyvSettings md5HexDigest:plainSign];
+    
+    NSString*url = [NSString stringWithFormat:@"http://hls.videocc.net/app/%@/%@/%@_%@.key?ts=%@&sign=%@",PolyvUserId,lastChar,videoPoolId,bitrate,ts,sign];
+    
+    NSMutableURLRequest *request = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:url]];
+    NSURLResponse * response;
+    NSError * error;
+    NSData * data = [NSURLConnection sendSynchronousRequest:request returningResponse:&response error:&error];
+
+    NSString*aeskey=[PolyvSettings md5HexDigest:[NSString stringWithFormat:@"%@%@",PolyvPrivatekey,videoPoolId ]];
+
+    Byte iv[] = {1, 2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 7, 5, 3, 2, 1};
+    
+    NSData*dedata = [data AES128DecryptedDataWithKey:[aeskey substringToIndex:16] iv:iv];
+
+    return dedata;
+}
+
++(NSString*)getVideoPoolId:(NSString*)vid{
+    NSRange range = [vid rangeOfString:@"_"];
+    if (range.location==NSNotFound) {
+        return nil;
+    }
+    NSString*videoPoolId = [vid substringToIndex:range.location];
+    return videoPoolId;
+}
+
+
++(BOOL)isVideoAvailable:(NSDictionary*)videoInfo{
+    NSString*timeoutflow = [videoInfo valueForKey:@"timeoutflow"];
+    NSString*outflow = [videoInfo valueForKey:@"outflow"];
+    int statusValue = [[videoInfo objectForKey:@"status"] intValue];
+    
+    
+    if ((statusValue!=0 && statusValue>=60) && ([outflow isEqualToString:@"false"] && [timeoutflow isEqualToString:@"false"])) {
+        return true;
+    }else{
+        return false;
+    }
+}
++(NSString*)changeM3u8Key:(NSString*)m3u8string videoPoolId:(NSString*)videoPoolId bitrate:(NSString*)bitrate{
+    
+    NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"URI=\"(.*)\""
+                                                                           options:NSRegularExpressionCaseInsensitive
+                                                                             error:nil];
+    NSString *newm3u8 = [regex stringByReplacingMatchesInString:m3u8string
+                                                        options:0
+                                                          range:NSMakeRange(0, [m3u8string length])
+                                                   withTemplate:[NSString stringWithFormat:@"URI=\"/hls/%@_%@.key\"",videoPoolId,bitrate]];
+    return newm3u8;
+    
+}
+-(void)initVideoSettings:(NSString*)privateKey Readtoken:(NSString*)readtoken Writetoken:(NSString*)writetoken UserId:(NSString*)userId{
+    PolyvPrivatekey = privateKey;
+    PolyvReadtoken = readtoken;
+    PolyvWritetoken = writetoken;
+    
+    PolyvUserId = userId;
+    NSString *resourcePath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents"];
+    NSString *plvPath = [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/plvideo"];
+    if (![[NSFileManager defaultManager] fileExistsAtPath:plvPath]){
+        [[NSFileManager defaultManager] createDirectoryAtPath:plvPath withIntermediateDirectories:NO attributes:nil error:nil];
+    }
+    
+    
+    // Create server
+    _webServer = [[GCDWebServer alloc] init];
+    
+    //NSString*plvPath =[resourcePath stringByAppendingPathComponent:@"plvideo"];
+    
+    [_webServer addGETHandlerForBasePath:@"/" directoryPath:resourcePath indexFilename:nil cacheAge:3600 allowRangeRequests:YES];
+    
+    // Add a handler to respond to GET requests on any URL
+    [_webServer addHandlerForMethod:@"GET"
+                          pathRegex:@"/hls/.*"
+                       requestClass:[GCDWebServerRequest class]
+                       processBlock:^GCDWebServerResponse *(GCDWebServerRequest* request) {
+                           
+                           
+                           //NSString*vid = [query objectForKey:@"vid"];
+                           NSString*path = [request path];
+                           
+                           NSRegularExpression *m3u8_regex = [NSRegularExpression regularExpressionWithPattern:@"^/hls/([0-9a-z_]{32})_([0-9a-z]{1})\\.m3u8$" options:0 error:NULL];
+                           NSRegularExpression *m3u8_index = [NSRegularExpression regularExpressionWithPattern:@"^/hls/([0-9a-z_]{32})\\.m3u8$" options:0 error:NULL];
+                           
+                           NSRegularExpression *key_regex = [NSRegularExpression regularExpressionWithPattern:@"^/hls/([0-9a-z_]{32})_([0-9a-z]{1})\\.key$" options:0 error:NULL];
+                           
+                           NSTextCheckingResult *m3u8_index_match = [m3u8_index firstMatchInString:path options:0 range:NSMakeRange(0, [path length])];
+                           NSTextCheckingResult *m3u8_match = [m3u8_regex firstMatchInString:path options:0 range:NSMakeRange(0, [path length])];
+                           
+                           NSTextCheckingResult *key_match = [key_regex firstMatchInString:path options:0 range:NSMakeRange(0, [path length])];
+                           //===========hls索引=========
+                           if(m3u8_index_match){
+                               NSRange groupOne = [m3u8_index_match rangeAtIndex:1];
+                               NSString*videoPoolId = [path substringWithRange:groupOne];
+                               NSString *firstChar = [videoPoolId substringToIndex:1];
+                               NSDictionary* videoInfo = [PolyvSettings loadVideoJson:[NSString stringWithFormat:@"%@_%@",videoPoolId,firstChar]];
+                               
+                               if (![PolyvSettings isVideoAvailable:videoInfo]) {
+                                   return [GCDWebServerDataResponse responseWithText:@""];
+                               }
+                               
+                               NSString*hlsIndex = [videoInfo valueForKey:@"hlsIndex"];
+                               NSData * m3u8content =[PolyvSettings getM3u8:hlsIndex];
+                               
+                               NSString* m3u8string = [[NSString alloc] initWithData:m3u8content encoding:NSUTF8StringEncoding];
+                               NSString *new = [m3u8string stringByReplacingOccurrencesOfString: videoPoolId withString:[NSString stringWithFormat:@"http://localhost:10519/hls/%@",videoPoolId ]];
+
+                               return [GCDWebServerDataResponse responseWithText:new];
+
+                               
+                           }
+                           if (m3u8_match) {
+                               NSRange groupOne = [m3u8_match rangeAtIndex:1];
+                               NSRange groupTwo = [m3u8_match rangeAtIndex:2];
+                               NSString*videoPoolId = [path substringWithRange:groupOne];
+                               NSString*bitrate = [path substringWithRange:groupTwo];
+                               NSString *firstChar = [videoPoolId substringToIndex:1];
+                               
+                               NSString* localm3u8 = [plvPath stringByAppendingString:[NSString stringWithFormat:@"/%@_%@.m3u8",videoPoolId,bitrate]];
+                               //本地文件存在则播放本地文件
+                               if ([[NSFileManager defaultManager] fileExistsAtPath:localm3u8]){
+                                   
+                                   NSString *fileContents = [[NSString alloc] initWithData:[[NSFileManager defaultManager] contentsAtPath:localm3u8] encoding:NSUTF8StringEncoding];
+                                   fileContents = [PolyvSettings changeM3u8Key:fileContents videoPoolId:videoPoolId bitrate:bitrate];
+                                   return [GCDWebServerDataResponse responseWithText:fileContents];
+                               }
+                               
+                               //判断视频状态
+                               NSDictionary* videoInfo = [PolyvSettings loadVideoJson:[NSString stringWithFormat:@"%@_%@",videoPoolId,firstChar]];
+                               
+                               NSArray *hlslinks = [videoInfo objectForKey:@"hls"];
+                               
+                               
+                               if ([PolyvSettings isVideoAvailable:videoInfo]) {
+                                   NSString*link = [hlslinks objectAtIndex:[bitrate integerValue]-1];
+                                   
+                                   NSData * m3u8content =[PolyvSettings getM3u8:link];
+                                   
+                                   //NSString* m3u8string = [NSString stringWithUTF8String:[m3u8content bytes]];
+                                   NSString* m3u8string = [[NSString alloc] initWithData:m3u8content encoding:NSUTF8StringEncoding];
+                                   
+                                   
+                                   NSString*newm3u8 = [PolyvSettings changeM3u8Key:m3u8string videoPoolId:videoPoolId bitrate:bitrate];
+                                   
+                                   
+                                   
+                                   return [GCDWebServerDataResponse responseWithText:newm3u8];
+                                   
+                               }else{
+                                   return [GCDWebServerDataResponse responseWithText:@""];
+                               }
+                               
+                               //NSData * m3u8content =[PolyvSettings getM3u8:[PolyvSettings getM3u8LinkByVideoPoolId:videoPoolId BitRate:bitrate]];
+                               //NSString[]*hls = [videoInfo valueForKey:@"hls"];
+                               
+                               
+                               
+                           }
+                           
+                           if (key_match) {
+                               
+                               
+                               NSRange groupOne = [key_match rangeAtIndex:1];
+                               NSRange groupTwo = [key_match rangeAtIndex:2];
+                               NSString*videoPoolId = [path substringWithRange:groupOne];
+                               NSString*bitrate = [path substringWithRange:groupTwo];
+                               //NSLog(@"key --- %@",vid);
+                               
+                               NSData * keydata =[PolyvSettings getKeyWithVideoPoolId:videoPoolId BitRate:bitrate];
+                               
+                               if(keydata==nil){
+                                   return [GCDWebServerDataResponse responseWithText:@""];
+                               }else{
+                                   return [GCDWebServerDataResponse responseWithData:keydata contentType:@"text/html; charset=utf-8"];
+                               }
+                               
+                               
+                               
+                           }
+                           return [GCDWebServerDataResponse responseWithText:@""];
+                           
+                           
+                           
+                           
+                           
+                           
+                       }];
+    
+    
+    
+    // Start server on port 8080
+    [_webServer startWithPort:10519 bonjourName:nil];
+    //[_webServer start];
+    NSLog(@"Visit %@ in your web browser", _webServer.serverURL);
+    
+}
+@end
